@@ -762,6 +762,58 @@ let resultBlob = null;
 let currentBg = 'transparent';
 let isProcessing = false;
 
+function isLikelyMobileDevice() {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '') ||
+    (window.matchMedia && window.matchMedia('(max-width: 768px)').matches);
+}
+
+async function prepareInputImageForInference(file) {
+  const MAX_DIM_MOBILE = 1400;
+  const MAX_DIM_DESKTOP = 2200;
+  const maxDim = isLikelyMobileDevice() ? MAX_DIM_MOBILE : MAX_DIM_DESKTOP;
+
+  const img = await new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('โหลดรูปไม่สำเร็จ'));
+    image.src = URL.createObjectURL(file);
+  });
+
+  const natW = img.naturalWidth || 0;
+  const natH = img.naturalHeight || 0;
+  if (!natW || !natH) throw new Error('ไม่สามารถอ่านขนาดรูปภาพได้');
+
+  const longestSide = Math.max(natW, natH);
+  if (longestSide <= maxDim) {
+    return { file, resized: false, originalWidth: natW, originalHeight: natH, width: natW, height: natH };
+  }
+
+  const scale = maxDim / longestSide;
+  const outW = Math.max(1, Math.round(natW * scale));
+  const outH = Math.max(1, Math.round(natH * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext('2d', { alpha: true });
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, 0, 0, outW, outH);
+
+  const resizedBlob = await new Promise((resolve, reject) => {
+    canvas.toBlob(b => b ? resolve(b) : reject(new Error('ปรับขนาดรูปภาพไม่สำเร็จ')), 'image/png');
+  });
+
+  return {
+    file: new File([resizedBlob], 'input-resized.png', { type: 'image/png' }),
+    resized: true,
+    originalWidth: natW,
+    originalHeight: natH,
+    width: outW,
+    height: outH,
+  };
+}
+
 const $hero = document.getElementById('top');
 const $zone = document.getElementById('uploadZone');
 const $input = document.getElementById('fileInput');
@@ -887,6 +939,14 @@ async function processFile(file) {
     $procTitle.textContent = 'กำลังเตรียมระบบ AI...';
     $procStatus.textContent = 'กรุณารอสักครู่ การโหลดโมเดลครั้งแรกอาจใช้เวลาประมาณ 30 วินาที';
 
+    $procTitle.textContent = '🖼️ กำลังเตรียมรูปภาพ...';
+    $procStatus.textContent = 'กำลังปรับขนาดให้เหมาะกับอุปกรณ์';
+
+    const prepared = await prepareInputImageForInference(file);
+    if (prepared.resized) {
+      $procStatus.textContent = `ลดขนาด ${prepared.originalWidth}x${prepared.originalHeight} → ${prepared.width}x${prepared.height} เพื่อให้เร็วขึ้นบนมือถือ`;
+    }
+
     const config = {
       progress: (key, current, total) => {
         try {
@@ -907,7 +967,7 @@ async function processFile(file) {
     };
 
     // Run AI background removal
-    resultBlob = await removeBackground(file, config);
+    resultBlob = await removeBackground(prepared.file, config);
 
     if (!resultBlob || resultBlob.size === 0) {
       throw new Error('ผลลัพธ์ว่างเปล่า กรุณาลองใช้รูปอื่น');
